@@ -34,17 +34,17 @@ if s.count(ANCHOR) != 1:
 
 NEW = (
     "    # ★第 32 发：root 域 `am start` 会报 `Can't find service: activity`(vivo 对非 shell 域隐藏服务)" + NL
-    "    #   ⇒ MPID 一直是空 ⇒ /proc/ksu_install_fd 从没被写过 ⇒ Manager 拿不到驱动 fd ⇒ 首页永远" + D + "不支持" + D + "。" + NL
-    "    #   正解：换 shell 域起它(原来那条留作兜底)，再**轮询等 pid**——PC 侧起来的也算。" + NL
-    "    runcon u:r:shell:s0 am start -n $MGRPKG/.ui.MainActivity >/dev/null 2>&1" + NL
-    "    am start -n $MGRPKG/.ui.MainActivity >/dev/null 2>&1" + NL
-    "    MPID=" + SQ + SQ + NL
-    "    for q in $(seq 1 40); do" + NL
-    "        sleep 3" + NL
-    "        MPID=$(pidof $MGRPKG | cut -d" + SQ + " " + SQ + " -f1)" + NL
-    "        [ -n " + D + "$MPID" + D + " ] && { log " + D + "      轮询 $((q*3))s 后拿到 Manager pid=$MPID" + D + "; break; }" + NL
-    "    done" + NL
-    "    [ -n " + D + "$MPID" + D + " ] || log " + D + "      !! 等满 120s 仍没有 Manager 进程 ⇒ fd 装不上，这一格不算" + D
+    +"    #   ⇒ MPID 一直是空 ⇒ /proc/ksu_install_fd 从没被写过 ⇒ Manager 拿不到驱动 fd ⇒ 首页永远" + D + "不支持" + D + "。" + NL
+    +"    #   正解：换 shell 域起它(原来那条留作兜底)，再**轮询等 pid**——PC 侧起来的也算。" + NL
+    +"    runcon u:r:shell:s0 am start -n $MGRPKG/.ui.MainActivity >/dev/null 2>&1" + NL
+    +"    am start -n $MGRPKG/.ui.MainActivity >/dev/null 2>&1" + NL
+    +"    MPID=" + SQ + SQ + NL
+    +"    for q in $(seq 1 40); do" + NL
+    +"        sleep 3" + NL
+    +"        MPID=$(pidof $MGRPKG | cut -d" + SQ + " " + SQ + " -f1)" + NL
+    +"        [ -n " + D + "$MPID" + D + " ] && { log " + D + "      轮询 $((q*3))s 后拿到 Manager pid=$MPID" + D + "; break; }" + NL
+    +"    done" + NL
+    +"    [ -n " + D + "$MPID" + D + " ] || log " + D + "      !! 等满 120s 仍没有 Manager 进程 ⇒ fd 装不上，这一格不算" + D
 )
 
 io.open(P, "w", encoding="utf-8", newline="").write(s.replace(ANCHOR, NEW))
