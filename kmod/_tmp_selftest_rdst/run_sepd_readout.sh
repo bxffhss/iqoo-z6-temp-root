@@ -43,7 +43,7 @@ grep -q 'cl%% want(\*}' "$FN" || no "R1 没摘 want() 尾 ⇒ R5 那把牙就是
 [ "$FAIL" = 0 ] && ok "R1 抽码闸：judge() 抽出 $JL 行/$JB 字节，两支分岔与 REJ 都在"
 
 ROWS=$(grep -vc '^#' "$TBL" | tr -dc '0-9')
-FULLPASS=<REDACTED> + 2))
+FULLPASS=$((ROWS + 2))
 tfv() { local t="${1#*;$2=}"; if [ "$t" = "$1" ]; then TV=""; else TV="${t%%;*}"; fi; }   # 纯 bash，不 fork
 
 # mkleg <输出文件> <形状>：形状＝ok|dec|drv|wanttrap|md5bad|normod|oldcount|noend
@@ -84,7 +84,7 @@ mkleg() {
 }
 # ★judge() 只在进本文件时 eval **一次**(装进当前 shell)，之后每次调用只改全局 ⇒ 不在每格里 fork+eval
 eval "$(cat "$FN")"
-setj() { LEGARC="$1"; REJ="${2:-0}"; READY="${3:-1}"; TBLREPO="$TBL"; SHOT=T; ROWS="$ROWS"; FULLPASS="<REDACTED>"; }
+setj() { LEGARC="$1"; REJ="${2:-0}"; READY="${3:-1}"; TBLREPO="$TBL"; SHOT=T; ROWS="$ROWS"; FULLPASS="$FULLPASS"; }
 # readout <腿件> <REJ> <READY> ⇒ 只回 ★那行判决(纯 bash 摘尾，不 fork)
 readout() {
   local out; setj "$1" "${2:-0}" "${3:-1}"
@@ -143,9 +143,9 @@ case "$v" in *"未测(读法①"*) ok "R8 READY=0 ⇒ $v" ;; *) no "R8 没等到
 # ===== R9 腿的旧账不当裁判 =====
 mkleg "$W" oldcount
 v=$(readout "$W" 1 1)
-case "$v" in 判正*REJUDGE*) ok "R9 腿自计 pass=<REDACTED> 而现行表全等 ⇒ $v" ;; *) no "R9 重判被旧账带红(=$v) ⇒ 重判口径没生效" ;; esac
+case "$v" in 判正*REJUDGE*) ok "R9 腿自计 pass=13/fail=1 而现行表全等 ⇒ $v" ;; *) no "R9 重判被旧账带红(=$v) ⇒ 重判口径没生效" ;; esac
 v=$(readout "$W" 0 1)
-case "$v" in *"模型红"*|*"判正"*) no "R9 REJ=0 时旧账(pass=<REDACTED>";; esac
+case "$v" in *"模型红"*|*"判正"*) no "R9 REJ=0 时旧账(pass=13≠$FULLPASS)必须不许判正(=$v)";; esac
 ok "R9 两条路分开：REJ=1 按现行表重算＝判正；REJ=0 仍拿腿自计⇒判据不齐(已验)"
 
 # ===== R10 真归档 × 真表(＝第 97 发的定性，可重跑) =====

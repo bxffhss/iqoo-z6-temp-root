@@ -2032,7 +2032,7 @@ bash kmod/check_acceptance.sh kmod/w103_att26.log           # 总闸：A 挂载 
 
 ```
 # 一条命令的端到端回归(含 reboot 进出，退出码=FAIL 数；post 整 boot 没跑会单独退 3)
-I_KNOW=1 bash kmod/regress_ksu.sh          # G1..G7 全 PASS = <REDACTED>
+I_KNOW=1 bash kmod/regress_ksu.sh          # G1..G7 全 PASS = 授权链没回退
 ATT=24 I_KNOW=1 bash kmod/w103_su.sh       # ★挂载路线三态判据(errno=2 / uid=0 / not-allowed)
 bash kmod/check_mount_su.sh                # 只读判据(默认读 kmod/w103_att22*.log，可传日志路径)
 adb reboot                                 # 收尾：不留持久化
@@ -2074,7 +2074,7 @@ Manager APK**，给任意 uid 授权之后，那个 uid 的进程敲 `su` 就拿
 
 ```
 # 一条命令的端到端回归(含 reboot 进出，退出码=FAIL 数；post 整 boot 没跑会单独退 3)
-I_KNOW=1 bash kmod/regress_ksu.sh          # G1..G7 全 PASS = <REDACTED>
+I_KNOW=1 bash kmod/regress_ksu.sh          # G1..G7 全 PASS = 链没回退
 # 想分段手跑：
 bash kmod/push_ksu.sh                      # ko=rc55 + shim(扫 fd 版) + stage v57
 I_KNOW=1 bash suw_apk/bootstrap.sh --punch # GhostLock：等 up>260 且 load1<6 再打

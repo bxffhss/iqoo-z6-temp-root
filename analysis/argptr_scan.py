@@ -257,7 +257,7 @@ def scan(start, ptr_sources, depth_note):
             continue
         if d0:
             taint.pop(d0, None)
-    # post-pass: <REDACTED> DEREF events that sit inside an uaccess window
+    # post-pass: mark DEREF events that sit inside an uaccess window
     texts = [(i.address, i.mnemonic, i.op_str) for i in insns]
     for e in events:
         if 'DEREF' in e['kind'] or 'INDIRECT' in e['kind']:

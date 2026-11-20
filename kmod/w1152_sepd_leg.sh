@@ -122,7 +122,7 @@ one_case() { # one_case <case名> <文件名>
     if [ "$r_trunc" = 0 ] && [ "$r_stmts" != "$w_n" ]; then ok=0; fi
     if [ "$r_trunc" = 1 ] && [ "$r_stmts" -ge "$w_n" ]; then ok=0; fi
   elif [ "$r_stmts" != 0 ]; then ok=0; fi
-  if [ "$ok" = 1 ]; then PASS=<REDACTED> say "CASEOK $name 1"; else FAILN=$((FAILN+1)); say "CASEOK $name 0"; fi
+  if [ "$ok" = 1 ]; then PASS=$((PASS+1)); say "CASEOK $name 1"; else FAILN=$((FAILN+1)); say "CASEOK $name 0"; fi
 }
 
 # 3) 按表里的 slots 分组跑(变体＝同一份字节换 pd_slots，需要重装一次)
@@ -145,7 +145,7 @@ echo DECODE >"$CTLF" 2>>"$ERRF"
 C1=$(par pd_calls); W=$(par pd_why); N=$(par pd_n)
 say "EMPTY_CTRL calls0=$C0 calls1=$C1 why=$W n=$N"
 if [ -n "$C0" ] && [ "$C0" = "$C1" ] && [ "$W" = "-1" ] && [ "$N" = "-1" ]; then
-  PASS=<REDACTED> say "CASEOK EMPTY_CTRL 1"
+  PASS=$((PASS+1)); say "CASEOK EMPTY_CTRL 1"
 else
   FAILN=$((FAILN+1)); say "CASEOK EMPTY_CTRL 0"
 fi
@@ -156,8 +156,8 @@ if [ "$KEEP" = 1 ]; then
 else
   rmmod $MOD 2>>"$ERRF"; urc=$?
   say "RMMOD rc=$urc modcnt=$(modcnt)"
-  if [ "$urc" = 0 ] && [ "$(modcnt)" = 0 ]; then PASS=<REDACTED> say "CASEOK RMMOD 1";
+  if [ "$urc" = 0 ] && [ "$(modcnt)" = 0 ]; then PASS=$((PASS+1)); say "CASEOK RMMOD 1";
   else FAILN=$((FAILN+1)); say "CASEOK RMMOD 0"; fi
 fi
-say "COUNTS pass=<REDACTED> fail=$FAILN enf=$(rd /sys/fs/selinux/enforce) uname=$(uname -r)"
+say "COUNTS pass=$PASS fail=$FAILN enf=$(rd /sys/fs/selinux/enforce) uname=$(uname -r)"
 say "END up=$(up)"

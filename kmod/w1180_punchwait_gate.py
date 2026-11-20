@@ -39,8 +39,8 @@ RC_LITERAL = r"echo RC=\$? >> /data/local/tmp/punch.log"
 ok = 0
 
 
-def chk(cond: bool, label: str, expect_pass: <REDACTED> -> bool:
-    """expect_pass=<REDACTED> 的夹具（现行真链）失败要打 [BAD]；反夹具的失败是预期，用中性 [--]。"""
+def chk(cond: bool, label: str, expect_pass: bool) -> bool:
+    """expect_pass=True 的夹具（现行真链）失败要打 [BAD]；反夹具的失败是预期，用中性 [--]。"""
     global ok
     if cond:
         ok += 1
@@ -68,7 +68,7 @@ def go_bounds(text: str):
     return n, s, n * s
 
 
-def eval_chain(boot: str, go: str, label: str, expect_pass: <REDACTED> -> bool:
+def eval_chain(boot: str, go: str, label: str, expect_pass: bool) -> bool:
     """对一对 (bootstrap.sh, go.sh) 文本跑全部断言；返回该夹具是否如预期全绿。"""
     global ok
     print(f"--- 夹具: {label} ---")
@@ -129,7 +129,7 @@ def main() -> int:
     go = GO.read_text(encoding="utf-8", errors="replace")
 
     # 正对照：现行真链必须全绿
-    if not eval_chain(boot, go, "real", expect_pass=<REDACTED>
+    if not eval_chain(boot, go, "real", expect_pass=True):
         print("VERDICT=FAIL (现行真链有断言红 —— 真链被改过或顺序变了，先查 §6.575)")
         return 1
 
@@ -141,20 +141,20 @@ def main() -> int:
         if nA != 1:
             print("  [BAD] 变异 A 没匹配到 bootstrap 等待循环那处 `seq 1 40`+`sleep 15`，形状变了要重对表")
             return 1
-        eval_chain(mA, go, "mutA_seq放大", expect_pass=<REDACTED>
+        eval_chain(mA, go, "mutA_seq放大", expect_pass=False)
 
         mB = boot.replace(RC_LITERAL, "", 1)
-        eval_chain(mB, go, "mutB_删RC证人", expect_pass=<REDACTED>
+        eval_chain(mB, go, "mutB_删RC证人", expect_pass=False)
 
         mC = boot.replace("post=/data/local/tmp/ksu_post.sh", "", 1)
-        eval_chain(mC, go, "mutC_删post回调", expect_pass=<REDACTED>
+        eval_chain(mC, go, "mutC_删post回调", expect_pass=False)
 
         mD = go.replace("for i in $(seq 1 200); do sleep 5",
                         "for i in $(seq 1 200); do sleep 500", 1)
         if mD == go:
             print("  [BAD] 变异 D 没匹配到 go.sh 第 3 步，形状变了要重对表")
             return 1
-        eval_chain(boot, mD, "mutD_goStep3放宽", expect_pass=<REDACTED>
+        eval_chain(boot, mD, "mutD_goStep3放宽", expect_pass=False)
 
     print(f"OK_COUNT={ok}")
     print("VERDICT=PASS  离线超时闸全绿（0 枪、真链零改动）")

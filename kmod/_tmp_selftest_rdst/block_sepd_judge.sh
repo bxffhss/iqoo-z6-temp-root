@@ -1,7 +1,7 @@
 judge() {
   CNT=$(grep -a '^COUNTS pass=' "$LEGARC" | tail -1)
-  PASSN=$(sed -n 's/^COUNTS pass=<REDACTED> .*/\1/p' <<<"$CNT"); FAILN=$(sed -n 's/.* fail=\([0-9]*\).*/\1/p' <<<"$CNT")
-  echo "    腿的计数行=[$CNT] ⇒ pass=<REDACTED> fail=${FAILN:-空}"
+  PASSN=$(sed -n 's/^COUNTS pass=\([0-9]*\) .*/\1/p' <<<"$CNT"); FAILN=$(sed -n 's/.* fail=\([0-9]*\).*/\1/p' <<<"$CNT")
+  echo "    腿的计数行=[$CNT] ⇒ pass=${PASSN:-空} fail=${FAILN:-空}"
   echo "    没过的格：$(grep -a '^CASEOK ' "$LEGARC" | awk '$3==0{print $2}' | tr '\n' ' ')"
   # ★★读法⑦(字节忠实性)＋⑥a/⑥b(分岔)在**同一趟**循环里算：分两趟就是两把尺，一改一漏就不同源。
   # ★★取数一律走 bash 自己的展开，不逐格调 sed/awk/grep：本机是 Windows＋Git Bash，一次 fork 上百毫秒，
@@ -62,12 +62,12 @@ judge() {
   elif [ "${REJ:-0}" = 1 ]; then
     # ★重判模式：腿自己那份 pass/fail 是**开枪时那张表**的账(表后来被修过就必然带旧账)，
     #   所以满分只认"按现行表逐格重算出来的 MATCH＝ROWS"，同时把旧账原样印出来当历史证人。
-    echo "    重判口径：腿自计 pass=<REDACTED> ⇒ 现行表逐格重算 $MATCH/$ROWS"
+    echo "    重判口径：腿自计 pass=${PASSN:-空}/fail=${FAILN:-空}(＝开枪时那份表的账，只当历史) ⇒ 现行表逐格重算 $MATCH/$ROWS"
     if [ "$MATCH" = "$ROWS" ]; then V="判正(REJUDGE＝0 枪重判：$ROWS 格六把读数与现行表全等)"; else V="判据不齐(重判 $MATCH/$ROWS；⑥a=$DEC ⑥b=$DRV)"; fi
   elif [ "${PASSN:-0}" = "$FULLPASS" ] && [ "${FAILN:-1}" = 0 ]; then V="判正"
   elif [ "$DEC" -gt 0 ]; then V="判负(读法⑥a：字节两端一致，而内核的 why/n/bad_at 与宿主期望不同＝跨架构不一致)"
   elif [ "$DRV" -gt 0 ]; then V="模型红(读法⑥b：期望表的派生格与内核读数不符＝仪器红；跨架构那一格由 w1154 三方对表裁决)"
-  else V="判据不齐(pass=<REDACTED> fail=$FAILN)"; fi
+  else V="判据不齐(pass=$PASSN/$FULLPASS fail=$FAILN)"; fi
   echo "  ★SHOT${SHOT}_SEPD=$V ｜ 口径：只答『aarch64 内核读数＝不＝宿主读数』，不答『规则能落地』(那是 #238 的 (2)(3) 段)"
   echo "  ★这一发**没碰** /sys/fs/selinux/，**没改**运行期策略，**没动**出货 ko 字节；探针由腿自己 rmmod。"
 }

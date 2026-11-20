@@ -27,7 +27,7 @@
 #       SHOT=97 I_KNOW=1 bash kmod/w1153_sepd_chain.sh  # 开窗派腿
 #       REJUDGE=<归档腿件> bash kmod/w1153_sepd_chain.sh  # ★0 枪：拿已有的读数＋**现行**期望表重判
 #         (修完模型不必再烧一发才能给它定性；这一支全程不碰 adb，也不 reboot)
-#         ★重判的满分只认"按现行表逐格重算出来的 MATCH＝表行数"；腿自己那行 `COUNTS pass=<REDACTED>
+#         ★重判的满分只认"按现行表逐格重算出来的 MATCH＝表行数"；腿自己那行 `COUNTS pass=/fail=`
 #           是**开枪时那张表**的账，原样印出来当历史证人，但不当裁判(表修过它必然带旧账)。
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -52,8 +52,8 @@ if [ -n "${MSYS_NO_PATHCONV+set}" ]; then echo "[x] MSYS_NO_PATHCONV 被定义�
 # ===== 判读(步 7 与 REJUDGE 共用同一段代码：同一把尺，不许"重判"另写一套) =====
 judge() {
   CNT=$(grep -a '^COUNTS pass=' "$LEGARC" | tail -1)
-  PASSN=$(sed -n 's/^COUNTS pass=<REDACTED> .*/\1/p' <<<"$CNT"); FAILN=$(sed -n 's/.* fail=\([0-9]*\).*/\1/p' <<<"$CNT")
-  echo "    腿的计数行=[$CNT] ⇒ pass=<REDACTED> fail=${FAILN:-空}"
+  PASSN=$(sed -n 's/^COUNTS pass=\([0-9]*\) .*/\1/p' <<<"$CNT"); FAILN=$(sed -n 's/.* fail=\([0-9]*\).*/\1/p' <<<"$CNT")
+  echo "    腿的计数行=[$CNT] ⇒ pass=${PASSN:-空} fail=${FAILN:-空}"
   echo "    没过的格：$(grep -a '^CASEOK ' "$LEGARC" | awk '$3==0{print $2}' | tr '\n' ' ')"
   # ★★读法⑦(字节忠实性)＋⑥a/⑥b(分岔)在**同一趟**循环里算：分两趟就是两把尺，一改一漏就不同源。
   # ★★取数一律走 bash 自己的展开，不逐格调 sed/awk/grep：本机是 Windows＋Git Bash，一次 fork 上百毫秒，
@@ -114,12 +114,12 @@ judge() {
   elif [ "${REJ:-0}" = 1 ]; then
     # ★重判模式：腿自己那份 pass/fail 是**开枪时那张表**的账(表后来被修过就必然带旧账)，
     #   所以满分只认"按现行表逐格重算出来的 MATCH＝ROWS"，同时把旧账原样印出来当历史证人。
-    echo "    重判口径：腿自计 pass=<REDACTED> ⇒ 现行表逐格重算 $MATCH/$ROWS"
+    echo "    重判口径：腿自计 pass=${PASSN:-空}/fail=${FAILN:-空}(＝开枪时那份表的账，只当历史) ⇒ 现行表逐格重算 $MATCH/$ROWS"
     if [ "$MATCH" = "$ROWS" ]; then V="判正(REJUDGE＝0 枪重判：$ROWS 格六把读数与现行表全等)"; else V="判据不齐(重判 $MATCH/$ROWS；⑥a=$DEC ⑥b=$DRV)"; fi
   elif [ "${PASSN:-0}" = "$FULLPASS" ] && [ "${FAILN:-1}" = 0 ]; then V="判正"
   elif [ "$DEC" -gt 0 ]; then V="判负(读法⑥a：字节两端一致，而内核的 why/n/bad_at 与宿主期望不同＝跨架构不一致)"
   elif [ "$DRV" -gt 0 ]; then V="模型红(读法⑥b：期望表的派生格与内核读数不符＝仪器红；跨架构那一格由 w1154 三方对表裁决)"
-  else V="判据不齐(pass=<REDACTED> fail=$FAILN)"; fi
+  else V="判据不齐(pass=$PASSN/$FULLPASS fail=$FAILN)"; fi
   echo "  ★SHOT${SHOT}_SEPD=$V ｜ 口径：只答『aarch64 内核读数＝不＝宿主读数』，不答『规则能落地』(那是 #238 的 (2)(3) 段)"
   echo "  ★这一发**没碰** /sys/fs/selinux/，**没改**运行期策略，**没动**出货 ko 字节；探针由腿自己 rmmod。"
 }
@@ -153,9 +153,9 @@ done < "$TBLREPO"
 [ "$MISS" = 0 ] || { echo "[x] 夹具与期望表对不上 ⇒ 不开窗(重跑生成器，别改表)"; exit 1; }
 echo "  夹具×表 全部同数(11 件、$(grep -vc '^#' $TBLREPO) 行)"
 # ★★★满分**从现行表算**：表里每行一个 CASEOK，再加 EMPTY_CTRL 与 RMMOD 两格。
-#   上一版这里钉死 `FULLPASS=<REDACTED> 12 行 ⇒ 真满分是 **14**：全对那一发会被我自己的常数
+#   上一版这里钉死 `FULLPASS=13`，而现行表有 12 行 ⇒ 真满分是 **14**：全对那一发会被我自己的常数
 #   判成"判据不齐"(＝例 231③"错的正向要求比缺要求更坏")。常数会随夹具漂移，算出来的不会。
-ROWS=$(grep -vc '^#' $TBLREPO | tr -dc '0-9'); FULLPASS=<REDACTED> + 2))
+ROWS=$(grep -vc '^#' $TBLREPO | tr -dc '0-9'); FULLPASS=$((ROWS + 2))
 echo "  ★满分＝表行($ROWS)＋2(EMPTY_CTRL/RMMOD)＝$FULLPASS(由现行表算，不背历史)"
 [ "$ROWS" = 12 ] || echo "  [!] 表行不是 12 ⇒ 夹具与表可能不同源了(仍按 $ROWS 算满分，但先核对生成器)"
 

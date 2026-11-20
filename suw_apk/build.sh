@@ -10,7 +10,7 @@ AJ="$SDK/platforms/android-35/android.jar"
 PY="C:/Users/Administrator/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 KEYTOOL="J:/Program Files/Java/jre1.8.0_181/bin/keytool.exe"
 KS=suw.keystore
-KS_PASS=<REDACTED>
+KS_PASS=android
 
 [ -f "$AJ" ] || { echo "找不到 android.jar: $AJ"; exit 1; }
 rm -rf build && mkdir -p build/obj build/dex
@@ -102,7 +102,7 @@ fi
 # ★必须只留 v2：KernelSU 的 apk_sign.c 解析 signing block 时，遇到不是 v2(0x7109871a) 也不是
 #   verity padding(0x42726577) 的 pair 就 goto invalid ⇒ **v3 pair 会把已经验过的 v2 结果整个丢掉**
 #   (§6.77：这才是 suw.apk 当不上 Manager 的真因，与证书指纹无关；官方 apk 只有 v2 所以它能过)
-"$BT/apksigner.bat" sign --ks "$KS" --ks-pass pass:<REDACTED> --key-pass pass:<REDACTED> \
+"$BT/apksigner.bat" sign --ks "$KS" --ks-pass pass:$KS_PASS --key-pass pass:$KS_PASS \
     --v1-signing-enabled true --v2-signing-enabled true \
     --v3-signing-enabled false --v4-signing-enabled false \
     --out suw.apk build/aligned.apk 2>&1 | tail -3
