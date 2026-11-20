@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.o
+*.so
+*.log
+.workbuddy/memory/.tmp*
+# 非本项目设备资料
+iqooz5/
+# 内部工作日志（不公开）
+.workbuddy/

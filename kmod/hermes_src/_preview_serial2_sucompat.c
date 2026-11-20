@@ -1,0 +1,462 @@
+#include "linux/file.h"
+#include "linux/fcntl.h"
+#include "linux/namei.h"
+#include <linux/compiler_types.h>
+#include <linux/preempt.h>
+#include <linux/printk.h>
+#include <linux/mm.h>
+#include <linux/uaccess.h>
+#include <asm/current.h>
+#include <linux/cred.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
+#include <linux/types.h>
+#include <linux/atomic.h>
+#include <linux/version.h>
+#include <linux/sched/task_stack.h>
+#include <linux/ptrace.h>
+
+#include "arch.h"
+#include "policy/allowlist.h"
+#include "policy/feature.h"
+#include "klog.h" // IWYU pragma: keep
+#include "runtime/ksud.h"
+#include "feature/sucompat.h"
+#include "policy/app_profile.h"
+#include "hook/syscall_hook.h"
+#include "supercall/supercall.h"
+#include "sulog/event.h"
+#include "ksu.h"
+#include "util.h"
+
+#define SU_PATH "/system/bin/su"
+#define SH_PATH "/system/bin/sh"
+
+bool ksu_su_compat_enabled __read_mostly = true;
+
+/* ===== EXP-8(§6.609)：把并发拍平 —— handler body 同一时刻只允许一个线程 =====
+ * ksu_exp6_serial=1 ⇒ 入口 atomic_cmpxchg 抢一个**全局**位：
+ *   抢不到 ⇒ `return ksu_orig_syscall_table[orig_nr](regs)`
+ *            （与 Exp-6d cut=1 逐字同形，那条路已实证 ≥193.5 s 无害）
+ *   抢到   ⇒ 走完 inner，出口**无条件**释放。
+ * ★默认 0 ⇒ 外层 `likely(!ksu_exp6_serial)` 短路，连原子操作都不做，行为与基线逐字同。
+ */
+unsigned ksu_exp6_serial = 0;
+module_param(ksu_exp6_serial, uint, 0644);
+static atomic_t ksu_serial_busy = ATOMIC_INIT(0);
+unsigned long ksu_serial_entered = 0;
+unsigned long ksu_serial_skipped = 0;
+
+
+/* ★第十八发崩在 su 命中之后的那段，所以这两条闸门做成**运行时可写**(0644)：
+ *    echo 1 > /sys/module/kernelsu/parameters/ksu_no_escape
+ *  ⇒ 同一个 boot 里可以按 "两条都开 → 只关 cred → 全开" 的顺序做三次 su，
+ *    一次窗口就把变量分干净，不必一发一 boot。 */
+/* rc53(md §6.103)：sucompat 里最可疑的一段(sulog 采集，用的是 GFP_KERNEL)单独一个开关，
+ * 默认 0=照旧。判据：SU1b 印了而 SU1c 没印 ⇒ 死在采集里。 */
+bool ksu_no_sulog __read_mostly = false;
+module_param(ksu_no_sulog, bool, 0444);
+MODULE_PARM_DESC(ksu_no_sulog, "sucompat: 跳过 ksu_sulog_capture_sucompat，只测改道+嵌套 execveat");
+
+bool ksu_no_escape __read_mostly = false;
+module_param(ksu_no_escape, bool, 0644);
+MODULE_PARM_DESC(ksu_no_escape, "sucompat: 跳过 escape_with_root_profile()，只测改道+execveat 重写");
+bool ksu_no_cred_override __read_mostly = false;
+module_param(ksu_no_cred_override, bool, 0644);
+MODULE_PARM_DESC(ksu_no_cred_override, "sucompat: filp_open(/data/adb/ksud) 不改 cred(ksu_cred 的 sid 缓存失败过 -22)");
+
+static int su_compat_feature_get(u64 *value)
+{
+    *value = ksu_su_compat_enabled ? 1 : 0;
+    return 0;
+}
+
+static int su_compat_feature_set(u64 value)
+{
+    bool enable = value != 0;
+    ksu_su_compat_enabled = enable;
+    pr_info("su_compat: set to %d\n", enable);
+    return 0;
+}
+
+static const struct ksu_feature_handler su_compat_handler = {
+    .feature_id = KSU_FEATURE_SU_COMPAT,
+    .name = "su_compat",
+    .get_handler = su_compat_feature_get,
+    .set_handler = su_compat_feature_set,
+};
+
+/* rc59(md §6.119③)：A/B 开关。=1 时**钩子照挂**，但两个"探测伪装"handler 什么都不做，
+ * 直接回落原实现 ⇒ 一发就能把死因劈成"挂在 faccessat/newfstatat 上本身致命"与"handler 内部致命"。 */
+bool ksu_stat_off __read_mostly = false;
+module_param(ksu_stat_off, bool, 0444);
+MODULE_PARM_DESC(ksu_stat_off, "sucompat: 挂着 stat/faccessat 钩子但不做探测伪装(直接回落原实现)");
+
+static char ksu_ksud_path[64] = KSUD_PATH;
+module_param_string(ksu_ksud_path, ksu_ksud_path, sizeof(ksu_ksud_path), 0444);
+MODULE_PARM_DESC(ksu_ksud_path, "sucompat 改道后要 exec 的那个文件(默认 " KSUD_PATH ")");
+
+static void __user *userspace_stack_buffer(const void *d, size_t len)
+{
+    // To avoid having to mmap a page in userspace, just write below the stack
+    // pointer.
+    char __user *p = (void __user *)current_user_stack_pointer() - len;
+
+    return copy_to_user(p, d, len) ? NULL : p;
+}
+
+static char __user *ksud_user_path(void)
+{
+    /* rc56(md §6.116)：原来写死编译期 KSUD_PATH，但 rc55 起真正被 exec 的文件是参数
+     * `ksu_ksud_path`(实测指到 tmpfs 的 /dev/ksud)。探测伪装必须跟改道目标一致，
+     * 否则 stage 收尾 rm 掉 /data/adb/ksud 之后，access(/system/bin/su) 又变 ENOENT
+     * 而 execve 改道还活着 ⇒ 用户看到的是"授权了但 app 说没找到 su"。 */
+    return userspace_stack_buffer(ksu_ksud_path, strlen(ksu_ksud_path) + 1);
+}
+
+static char __user *empty_user_path(void)
+{
+    return userspace_stack_buffer("", sizeof(""));
+}
+
+static const char su_path[] = SU_PATH;
+/* rc55(md §6.109)：ksud 的路径做成 insmod 期参数，默认保持老行为(/data/adb/ksud)。
+ * 放 tmpfs(如 /dev/ksud)的好处是"重启自动没有"，于是 stage 不必为了不留痕而删它 ——
+ * 而现在一删，`su` 就在窗口后段失效了(第一百零八发前实测)。
+ * ★参数是 insmod 时复制进缓冲区的(module_param_string)，运行时写不进去(sysfs 早被我们自己摘了)，
+ *   所以换路径 = 改 /data/local/tmp/ksu_args.txt 再打一发，不用重编。 */
+
+
+static bool is_ksud_exists()
+{
+    struct path path;
+
+    if (kern_path(ksu_ksud_path, 0, &path) < 0) {
+        return false;
+    }
+    path_put(&path);
+    return true;
+}
+
+long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
+{
+    const char __user **filename_user, *orig_filename;
+    long ret;
+    const struct cred *old_cred;
+    char path[sizeof(su_path) + 1];
+
+    /* rc78：社区路线（探测伪装），热路径零打印。逻辑与 rc77 等价，只去掉 KSUBEAT FA* 调试输出。 */
+    if (ksu_stat_off)
+        goto do_orig_facessat;
+    if (!ksu_is_allow_uid_for_current(current_uid().val))
+        goto do_orig_facessat;
+
+    filename_user = (const char __user **)&PT_REGS_PARM2(regs);
+    memset(path, 0, sizeof(path));
+    if (strncpy_from_user_nofault(path, *filename_user, sizeof(path)) < 0)
+        goto do_orig_facessat;
+
+    if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+        old_cred = override_creds(ksu_cred);
+        if (is_ksud_exists()) {
+            orig_filename = *filename_user;
+            *filename_user = ksud_user_path();
+            ret = ksu_orig_syscall_table[orig_nr](regs);
+            revert_creds(old_cred);
+            *filename_user = orig_filename;
+            return ret;
+        }
+        revert_creds(old_cred);
+    }
+
+do_orig_facessat:
+    return ksu_orig_syscall_table[orig_nr](regs);
+}
+
+
+long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs)
+{
+    const char __user **filename_user, *orig_filename;
+    long ret;
+    const struct cred *old_cred;
+    char path[sizeof(su_path) + 1];
+
+    /* rc78：同上——去掉 rc77 里 9 条重复的 `if (ksu_stat_off)` 与 13 条 FS0 打印、以及 FS5 decline。 */
+    if (ksu_stat_off)
+        goto do_orig_stat;
+    if (!ksu_is_allow_uid_for_current(current_uid().val))
+        goto do_orig_stat;
+
+    filename_user = (const char __user **)&PT_REGS_PARM2(regs);
+    memset(path, 0, sizeof(path));
+    if (strncpy_from_user_nofault(path, *filename_user, sizeof(path)) < 0)
+        goto do_orig_stat;
+
+    if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+        old_cred = override_creds(ksu_cred);
+        if (is_ksud_exists()) {
+            orig_filename = *filename_user;
+            *filename_user = ksud_user_path();
+            ret = ksu_orig_syscall_table[orig_nr](regs);
+            revert_creds(old_cred);
+            *filename_user = orig_filename;
+            return ret;
+        }
+        revert_creds(old_cred);
+    }
+
+do_orig_stat:
+    return ksu_orig_syscall_table[orig_nr](regs);
+}
+
+
+static long ksu_handle_execve_sucompat_inner(const char __user **filename_user,
+                                              const char __user *const __user *argv_user, unsigned long envp,
+                                              bool execveat, int orig_nr, struct pt_regs *regs)
+{
+    const char __user *fn;
+    struct ksu_sulog_pending_event *pending_sucompat = NULL;
+    char path[sizeof(su_path) + 1];
+    long ret, orig_regs[5];
+    unsigned long addr;
+    int su_fd = -1;
+    int tmp_fd;
+    struct file *ksud_file;
+    const struct cred *old_cred;
+
+    path[0] = 0; /* 任何一条"放弃"打印都不许读到未初始化栈(这个函数的 path 是栈上数组) */
+    if (execveat && ((int)PT_REGS_SYSCALL_PARM1(regs) != AT_FDCWD || (int)PT_REGS_PARM5(regs) != 0))
+        goto do_orig_execve;
+
+    if (unlikely(!filename_user)) {
+        pr_info("KSUBEAT SD0 decline: filename_user=NULL pid=%d uid=%u\n",
+                current->pid, current_uid().val);
+        goto do_orig_execve;
+    }
+
+    if (!ksu_is_allow_uid_for_current(current_uid().val)) {
+        /* ★这条就是 uid 2000 的死刑：__ksu_is_allow_uid() 里 `forbid_system_uid(uid)`
+         *   (uid < 10000 直接 return false，**连名单都不查**) ⇒ shell 只能靠 allow_shell=1。 */
+        if (1) /* 6.46：判据不许带筛子，无条件印 */
+            pr_info("KSUBEAT SD1 decline: uid=%u 是 system uid(forbid_system_uid)，名单不算\n",
+                    current_uid().val);
+        goto do_orig_execve;
+    }
+
+    addr = untagged_addr((unsigned long)*filename_user);
+    fn = (const char __user *)addr;
+    memset(path, 0, sizeof(path));
+
+    ret = strncpy_from_user(path, fn, sizeof(path));
+
+    if (ret < 0) {
+        pr_warn("KSUBEAT SD2 decline: strncpy_from_user=%ld pid=%d\n", ret, current->pid);
+        goto do_orig_execve;
+    }
+
+    if (likely(memcmp(path, su_path, sizeof(su_path)))) {
+        /* 路径不是 su ⇒ 这是正常 exec，本来就不该拦。低频才印：只有"这个 uid 有资格"时才印。 */
+        if (ksu_is_allow_uid(current_uid().val))
+            pr_info("KSUBEAT SD3 decline: 路径不是 su: [%s] pid=%d uid=%u\n", path, current->pid,
+                    current_uid().val);
+        goto do_orig_execve;
+    }
+
+    pr_info("KSUBEAT SU0 su found: pid=%d comm=%s uid=%u no_escape=%d no_cred_override=%d\n",
+            current->pid, current->comm, current_uid().val, ksu_no_escape ? 1 : 0,
+            ksu_no_cred_override ? 1 : 0);
+
+    pr_info("KSUBEAT SD4 su 命中，开始拿 fd: pid=%d uid=%u\n", current->pid, current_uid().val);
+    tmp_fd = get_unused_fd_flags(O_CLOEXEC);
+    if (tmp_fd < 0) {
+        pr_err("alloc tmp fd err: %d\n", tmp_fd);
+        goto do_orig_execve;
+    }
+
+    pr_info("KSUBEAT SU1 before filp_open: tmp_fd=%d no_cred_override=%d\n", tmp_fd,
+            ksu_no_cred_override ? 1 : 0);
+    if (ksu_no_cred_override) {
+        old_cred = NULL;
+        ksud_file = filp_open(ksu_ksud_path, O_PATH, 0);
+    } else {
+        old_cred = override_creds(ksu_cred);
+        ksud_file = filp_open(ksu_ksud_path, O_PATH, 0);
+        revert_creds(old_cred);
+        old_cred = NULL;
+    }
+    if (IS_ERR(ksud_file)) {
+        pr_err("open ksud err: %ld\n", PTR_ERR(ksud_file));
+        put_unused_fd(tmp_fd);
+        goto do_orig_execve;
+    }
+
+    fd_install(tmp_fd, ksud_file);
+    pr_info("KSUBEAT SU1a fd_install 完: tmp_fd=%d ksud_file=%px\n", tmp_fd, (void *)ksud_file);
+
+    if (ksu_no_sulog) {
+        pr_info("KSUBEAT SU1b 跳过 sulog 采集(ksu_no_sulog=1): argv=%px\n", (void *)argv_user);
+        pending_sucompat = NULL;
+    } else {
+        pr_info("KSUBEAT SU1b before sulog 采集: argv=%px filename=%lx\n", (void *)argv_user,
+                (unsigned long)*filename_user);
+        pending_sucompat = ksu_sulog_capture_sucompat(*filename_user, argv_user, GFP_KERNEL);
+        pr_info("KSUBEAT SU1c after sulog 采集: pending=%px\n", (void *)pending_sucompat);
+    }
+    // execve(file, argv, environ)
+    // execveat(fd, file, argv, environ, flags)
+    orig_regs[0] = PT_REGS_SYSCALL_PARM1(regs);
+    orig_regs[1] = regs->__PT_PARM2_REG;
+    orig_regs[2] = regs->__PT_PARM3_REG;
+    orig_regs[3] = regs->__PT_SYSCALL_PARM4_REG;
+    orig_regs[4] = regs->__PT_PARM5_REG;
+    regs->__PT_PARM5_REG = AT_EMPTY_PATH;
+    regs->__PT_SYSCALL_PARM4_REG = envp;
+    regs->__PT_PARM3_REG = (unsigned long)argv_user;
+    regs->__PT_PARM2_REG = empty_user_path();
+    pr_info("KSUBEAT SU1d 寄存器已改: parm1=%px parm2=%px parm3=%px parm4=%lx parm5=%lu\n",
+            (void *)orig_regs[0], (void *)regs->__PT_PARM2_REG, (void *)regs->__PT_PARM3_REG,
+            (unsigned long)regs->__PT_SYSCALL_PARM4_REG, (unsigned long)regs->__PT_PARM5_REG);
+    PT_REGS_SYSCALL_PARM1(regs) = tmp_fd;
+
+    if (ksu_no_escape) {
+        pr_info("KSUBEAT SU2 skip escape_with_root_profile pid=%d uid=%u\n", current->pid,
+                current_uid().val);
+        ret = 0;
+    } else {
+        pr_info("KSUBEAT SU2 before escape_with_root_profile pid=%d uid=%u\n", current->pid,
+                current_uid().val);
+        ret = escape_with_root_profile();
+        if (ret) {
+            pr_err("escape_with_root_profile failed: %ld\n", ret);
+        }
+    }
+    ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
+
+    pr_info("KSUBEAT SU3 before nested execveat: fd=%d uid=%u euid=%u parm2=%px parm5=%lu\n",
+            (int)PT_REGS_SYSCALL_PARM1(regs), current_uid().val, current_euid().val,
+            (void *)regs->__PT_PARM2_REG, (unsigned long)regs->__PT_PARM5_REG);
+    ret = ksu_orig_syscall_table[__NR_execveat](regs);
+    pr_info("KSUBEAT SU4 after nested execveat: ret=%ld uid=%u\n", ret, current_uid().val);
+    if (ret < 0) {
+        ksu_close_fd(tmp_fd);
+        PT_REGS_SYSCALL_PARM1(regs) = orig_regs[0];
+        regs->__PT_PARM2_REG = orig_regs[1];
+        regs->__PT_PARM3_REG = orig_regs[2];
+        regs->__PT_SYSCALL_PARM4_REG = orig_regs[3];
+        regs->__PT_PARM5_REG = orig_regs[4];
+    } else {
+        // Only grant the scoped driver capability after the selected root
+        // profile has been applied successfully.
+        su_fd = ksu_install_su_fd();
+        if (su_fd < 0) {
+            pr_warn("install su session fd failed: %d\n", su_fd);
+        }
+    }
+    return ret;
+
+do_orig_execve:
+    if (ksu_is_allow_uid(current_uid().val))
+        pr_info("KSUBEAT SD5 do_orig_execve: nr=%d pid=%d uid=%u path=[%s]\n", orig_nr,
+                current->pid, current_uid().val, path);
+    return ksu_orig_syscall_table[orig_nr](regs);
+}
+
+/* ===== EXP-8 串行闸包装：只有抢到全局位的那一个线程能进 inner ===== */
+static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
+                                              const char __user *const __user *argv_user,
+                                              unsigned long envp, bool execveat, int orig_nr,
+                                              struct pt_regs *regs)
+{
+    long r;
+
+    if (likely(!ksu_exp6_serial))
+        return ksu_handle_execve_sucompat_inner(filename_user, argv_user, envp, execveat,
+                                                orig_nr, regs);
+
+    if (atomic_cmpxchg(&ksu_serial_busy, 0, 1) != 0) {
+        ksu_serial_skipped++;
+        if (ksu_serial_skipped == 1 || ksu_serial_skipped == 100 ||
+            ksu_serial_skipped == 1000 || ksu_serial_skipped == 10000)
+            pr_info("KSUBEAT SER skip=%lu enter=%lu pid=%d uid=%u\n", ksu_serial_skipped,
+                    ksu_serial_entered, current->pid, current_uid().val);
+        return ksu_orig_syscall_table[orig_nr](regs);
+    }
+
+    ksu_serial_entered++;
+    if (ksu_serial_entered == 1 || ksu_serial_entered == 100 ||
+        ksu_serial_entered == 1000 || ksu_serial_entered == 10000)
+        pr_info("KSUBEAT SER enter=%lu skip=%lu pid=%d uid=%u\n", ksu_serial_entered,
+                ksu_serial_skipped, current->pid, current_uid().val);
+
+    r = ksu_handle_execve_sucompat_inner(filename_user, argv_user, envp, execveat, orig_nr, regs);
+
+    atomic_set(&ksu_serial_busy, 0);
+    return r;
+}
+
+
+long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs)
+{
+    return ksu_handle_execve_sucompat_common(filename_user, (const char __user *const __user *)PT_REGS_PARM2(regs),
+                                             PT_REGS_PARM3(regs), false, orig_nr, regs);
+}
+
+long ksu_handle_execveat_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs)
+{
+    return ksu_handle_execve_sucompat_common(filename_user, (const char __user *const __user *)PT_REGS_PARM3(regs),
+                                             PT_REGS_SYSCALL_PARM4(regs), true, orig_nr, regs);
+}
+
+// sucompat: permitted process can execute 'su' to gain root access.
+/* ===== EXP-8b(§6.610)：**拉取式**见证 —— /proc/ksu_ser =====
+ * 为什么不用 pr_info：第 15 枪查明 stage 那份内核日志是被过滤的子集（连无条件必打的
+ * `KSUBEAT M2/M3/M5` 都不在里面），"打印为 0" 推不出 "路径没跑"。
+ * 这里改成 read 时**现算**，PC 侧在 19 秒窗口里 poll —— 不经环形缓冲、不经 stage 抽取。
+ * ★只读，不改变任何执行路径；唯一的语义增量是 init 时多建一个 0444 文件。
+ */
+extern unsigned ksu_exp6_mode;
+extern unsigned ksu_hook_mask;
+
+static ssize_t ksu_ser_read(struct file *filp, char __user *ubuf, size_t cnt, loff_t *ppos)
+{
+    char line[192];
+    int n;
+
+    if (*ppos > 0)
+        return 0;
+    n = scnprintf(line, sizeof(line),
+                  "SERD serial=%u mode=%u mask=0x%x enter=%lu skip=%lu busy=%d\n",
+                  ksu_exp6_serial, ksu_exp6_mode, ksu_hook_mask,
+                  ksu_serial_entered, ksu_serial_skipped, atomic_read(&ksu_serial_busy));
+    if ((size_t)n < cnt)
+        cnt = (size_t)n;
+    if (copy_to_user(ubuf, line, cnt))
+        return -EFAULT;
+    *ppos += (loff_t)cnt;
+    return (ssize_t)cnt;
+}
+
+static const struct file_operations ksu_ser_fops = {
+    .owner = THIS_MODULE,
+    .read = ksu_ser_read,
+    .llseek = default_llseek,
+};
+
+void __init ksu_sucompat_init()
+{
+    pr_info("KSUBEAT M5 enter sucompat_init\n");
+    {
+        struct proc_dir_entry *pe = proc_create("ksu_ser", 0444, NULL, &ksu_ser_fops);
+
+        pr_info("KSUBEAT SERD proc=%s serial=%u mode=%u mask=0x%x\n",
+                pe ? "ok" : "FAIL", ksu_exp6_serial, ksu_exp6_mode, ksu_hook_mask);
+    }
+    if (ksu_register_feature_handler(&su_compat_handler)) {
+        pr_err("Failed to register su_compat feature handler\n");
+    }
+}
+
+void __exit ksu_sucompat_exit()
+{
+    ksu_unregister_feature_handler(KSU_FEATURE_SU_COMPAT);
+}
